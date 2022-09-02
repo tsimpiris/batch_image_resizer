@@ -3,7 +3,9 @@ import sys
 import glob
 import shutil
 import timeit
+import datetime
 
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 
 import PIL
@@ -12,8 +14,6 @@ from PIL import Image
 
 def main():
     inputs_dict = ask_inputs()
-
-    starttime = timeit.default_timer()
 
     inputs_dict['Images'] = [f for f in glob.glob(os.path.join(
         inputs_dict['Input folder'], '*.jpg'))]
@@ -27,29 +27,29 @@ def main():
     inputs_dict['Output folder'] = create_output_folder(
         inputs_dict['Input folder'])
 
-    n_threads = len(inputs_dict['Images'])
-    with ThreadPoolExecutor(n_threads) as executor:
-        # _ = [executor.submit(resize_image, image, inputs_dict)
-        #      for image in inputs_dict['Images']]
+    starttime = timeit.default_timer()
 
-        failures = []
-        counter = 0
-        for i, image in enumerate(inputs_dict['Images']):
-            try:
-                executor.submit(resize_image, image, inputs_dict)
-                counter += 1
-            except Exception:
-                failures.append(os.path.basename(image))
+    global total_images, total_images_resized
+    total_images = len(inputs_dict["Images"])
+    total_images_resized = 0
 
-        progress(i+1, len(inputs_dict['Images']), suffix='')
+    with ThreadPoolExecutor(os.cpu_count() + 4) as executor:
+        futures = [executor.submit(resize_image, image, inputs_dict)
+             for image in inputs_dict['Images']]
+
+        for future in futures:
+            future.add_done_callback(progress)
+
+    failed_images = check_failures(inputs_dict)
 
     print(
-        f'\n\nJob done in {round(timeit.default_timer() - starttime, 3)} seconds')
-    print(
-        f'Successfully resized images: {counter}/{len(inputs_dict["Images"])}')
-    if len(failures) > 0:
-        print(f'Failed to resize the following images: {", ".join(failures)}')
-
+        f'\n\nSuccessfully resized {total_images-len(failed_images)}/{total_images} images in {str(datetime.timedelta(seconds=timeit.default_timer() - starttime))}')
+    
+    if len(failed_images) == 1:
+        print(f'Failed to resize the following ({len(failed_images)}) image: {", ".join(failed_images)}')
+    elif len(failed_images) > 1:
+        print(f'Failed to resize the following ({len(failed_images)}) images: {", ".join(failed_images)}')
+    
 
 def resize_image(image, inputs_dict):
     img = Image.open(image)
@@ -87,7 +87,11 @@ def ask_inputs():
     while True:
         try:
             img_width = int(input("\nType width:\n"))
-            break
+            if img_width > 0:
+                break
+            else:
+                print('Please type an integer > 0')
+                continue
         except Exception:
             print('Please type an integer...')
             continue
@@ -116,15 +120,31 @@ def create_output_folder(input_folder):
     return output_folder
 
 
-def progress(count, total, suffix=''):
-    bar_len = 50
-    filled_len = int(round(bar_len * count / float(total)))
+def check_failures(inputs_dict):
+    output_images_lst = [os.path.basename(f) for f in glob.glob(os.path.join(inputs_dict['Output folder'], '*.jpg'))]
+    input_images_lst = [os.path.basename(f) for f in inputs_dict['Images']]
 
-    percents = round(100.0 * count / float(total), 1)
-    bar = '#' * filled_len + '-' * (bar_len - filled_len)
+    return list(set(input_images_lst) - set(output_images_lst))
 
-    sys.stdout.write('[%s] %s%s complete%s\r' % (bar, percents, '%', suffix))
-    sys.stdout.flush()
+
+def progress(self):
+    suffix=""
+    
+    global lock
+    lock = Lock()
+
+    with lock:
+        global total_images_resized
+        total_images_resized += 1
+
+        bar_len = 50
+        filled_len = int(round(bar_len * total_images_resized / float(total_images)))
+
+        percents = round(100.0 * total_images_resized / float(total_images), 1)
+        bar = '#' * filled_len + '-' * (bar_len - filled_len)
+
+        sys.stdout.write('[%s] %s%s complete%s\r' % (bar, percents, '%', suffix))
+        sys.stdout.flush()
 
 
 if __name__ == '__main__':
